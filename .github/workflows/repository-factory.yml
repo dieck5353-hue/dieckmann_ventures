@@ -65,6 +65,7 @@ jobs:
       github.event_name == 'issues' &&
       github.event.label.name == 'feos-repo-approved' &&
       github.repository_owner == 'dieck5353-hue' &&
+      github.event.issue.user.login == 'dieck5353-hue' &&
       contains(github.event.issue.assignees.*.login, 'dieck5353-hue') &&
       startsWith(github.event.issue.title, '[FEOS REPO]')
     runs-on: ubuntu-latest
@@ -72,7 +73,6 @@ jobs:
     steps:
       - name: Validate request and secret
         env:
-          EVENT_PATH: ${{ github.event_path }}
           FEOS_REPO_TOKEN: ${{ secrets.FEOS_REPO_TOKEN }}
         run: |
           python3 - <<'PY'
@@ -83,7 +83,7 @@ jobs:
           if not os.environ.get("FEOS_REPO_TOKEN"):
               raise SystemExit("FEOS_REPO_TOKEN is not configured.")
 
-          with open(os.environ["EVENT_PATH"], encoding="utf-8") as handle:
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
               event = json.load(handle)
 
           body = event["issue"].get("body") or ""
