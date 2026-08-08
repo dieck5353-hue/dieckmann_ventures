@@ -1,0 +1,288 @@
+name: FEOS Repository Factory
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/repository-factory.yml
+  issues:
+    types:
+      - labeled
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: feos-repository-factory-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  setup-label:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure the approval label exists
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          url = f"https://api.github.com/repos/{os.environ['REPOSITORY']}/labels"
+          request = urllib.request.Request(
+              url,
+              data=json.dumps({
+                  "name": "feos-repo-approved",
+                  "color": "1f6feb",
+                  "description": "Authorizes the FEOS Repository Factory to process this request",
+              }).encode(),
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "feos-repository-factory",
+              },
+          )
+          try:
+              urllib.request.urlopen(request).read()
+              print("Approval label created.")
+          except urllib.error.HTTPError as error:
+              if error.code == 422:
+                  print("Approval label already exists.")
+              else:
+                  raise
+          PY
+
+  create-private-repository:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.label.name == 'feos-repo-approved' &&
+      github.repository_owner == 'dieck5353-hue' &&
+      contains(github.event.issue.assignees.*.login, 'dieck5353-hue') &&
+      startsWith(github.event.issue.title, '[FEOS REPO]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate request and secret
+        env:
+          EVENT_PATH: ${{ github.event_path }}
+          FEOS_REPO_TOKEN: ${{ secrets.FEOS_REPO_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          if not os.environ.get("FEOS_REPO_TOKEN"):
+              raise SystemExit("FEOS_REPO_TOKEN is not configured.")
+
+          with open(os.environ["EVENT_PATH"], encoding="utf-8") as handle:
+              event = json.load(handle)
+
+          body = event["issue"].get("body") or ""
+          sections = {}
+          heading = None
+          lines = []
+          for line in body.splitlines():
+              match = re.fullmatch(r"###\s+(.+?)\s*", line)
+              if match:
+                  if heading is not None:
+                      sections[heading] = "\n".join(lines).strip()
+                  heading = match.group(1)
+                  lines = []
+              elif heading is not None:
+                  lines.append(line)
+          if heading is not None:
+              sections[heading] = "\n".join(lines).strip()
+
+          name = sections.get("Repository name", "").strip()
+          if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?", name):
+              raise SystemExit("Repository name must be 1-100 lowercase letters, digits, dots, underscores, or hyphens, without trailing punctuation.")
+          if name.endswith(".git"):
+              raise SystemExit("Repository name must not end in .git.")
+
+          description = sections.get("Description", "").strip()
+          if len(description) > 350:
+              raise SystemExit("Description must be 350 characters or fewer.")
+
+          gitignore = sections.get("Gitignore template", "None").strip()
+          allowed_gitignores = {"None", "Node", "Python", "VisualStudio", "Terraform", "Go", "Rust", "Java", "macOS"}
+          if gitignore not in allowed_gitignores:
+              raise SystemExit("Unsupported gitignore template.")
+
+          license_name = sections.get("License", "None").strip()
+          licenses = {
+              "None": "",
+              "MIT": "mit",
+              "Apache-2.0": "apache-2.0",
+              "GPL-3.0": "gpl-3.0",
+              "BSD-3-Clause": "bsd-3-clause",
+              "MPL-2.0": "mpl-2.0",
+              "Unlicense": "unlicense",
+          }
+          if license_name not in licenses:
+              raise SystemExit("Unsupported license.")
+
+          confirmation = sections.get("Private-only confirmation", "")
+          if "- [x]" not in confirmation.lower():
+              raise SystemExit("Private-only confirmation is required.")
+
+          request = {
+              "name": name,
+              "description": description,
+              "gitignore_template": "" if gitignore == "None" else gitignore,
+              "license_template": licenses[license_name],
+          }
+          with open("/tmp/feos-repo-request.json", "w", encoding="utf-8") as handle:
+              json.dump(request, handle)
+          print(f"Validated private repository request: {name}")
+          PY
+
+      - name: Create private repository
+        id: create
+        env:
+          FEOS_REPO_TOKEN: ${{ secrets.FEOS_REPO_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          with open("/tmp/feos-repo-request.json", encoding="utf-8") as handle:
+              request_data = json.load(handle)
+
+          token = os.environ["FEOS_REPO_TOKEN"]
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "feos-repository-factory",
+          }
+          name = request_data["name"]
+          existing_url = f"https://api.github.com/repos/dieck5353-hue/{name}"
+          try:
+              existing = urllib.request.urlopen(urllib.request.Request(existing_url, headers=headers)).read()
+              repository = json.loads(existing)
+              html_url = repository["html_url"]
+              result = "already-existed"
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              payload = {
+                  "name": name,
+                  "description": request_data["description"],
+                  "private": True,
+                  "auto_init": True,
+                  "has_issues": True,
+                  "has_projects": False,
+                  "has_wiki": False,
+              }
+              if request_data["gitignore_template"]:
+                  payload["gitignore_template"] = request_data["gitignore_template"]
+              if request_data["license_template"]:
+                  payload["license_template"] = request_data["license_template"]
+
+              create_request = urllib.request.Request(
+                  "https://api.github.com/user/repos",
+                  data=json.dumps(payload).encode(),
+                  method="POST",
+                  headers=headers,
+              )
+              repository = json.loads(urllib.request.urlopen(create_request).read())
+              if not repository.get("private"):
+                  raise SystemExit("Safety check failed: GitHub did not report the new repository as private.")
+              html_url = repository["html_url"]
+              result = "created"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"name={name}\n")
+              output.write(f"url={html_url}\n")
+              output.write(f"result={result}\n")
+          print(f"Repository {result}: {name}")
+          PY
+
+      - name: Report success and close request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CREATED_NAME: ${{ steps.create.outputs.name }}
+          CREATED_URL: ${{ steps.create.outputs.url }}
+          CREATE_RESULT: ${{ steps.create.outputs.result }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          headers = {
+              "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "feos-repository-factory",
+          }
+          base = f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}"
+          result = os.environ["CREATE_RESULT"]
+          verb = "Created" if result == "created" else "Confirmed existing"
+          comment = {
+              "body": (
+                  f"{verb} private repository "
+                  f"[{os.environ['CREATED_NAME']}]({os.environ['CREATED_URL']}).\n\n"
+                  "FEOS may initialize and operate this repository under its standing private-repository authority. "
+                  "Making it public, transferring it, archiving it, or deleting it remains approval-gated."
+              )
+          }
+          urllib.request.urlopen(urllib.request.Request(
+              f"{base}/comments",
+              data=json.dumps(comment).encode(),
+              method="POST",
+              headers=headers,
+          )).read()
+          urllib.request.urlopen(urllib.request.Request(
+              base,
+              data=json.dumps({"state": "closed", "state_reason": "completed"}).encode(),
+              method="PATCH",
+              headers=headers,
+          )).read()
+          PY
+
+      - name: Report failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          url = f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}/comments"
+          body = {
+              "body": (
+                  "Repository creation did not complete. The request remains open and no public repository was created. "
+                  f"Review the [sanitized workflow run]({os.environ['RUN_URL']}) before retrying."
+              )
+          }
+          urllib.request.urlopen(urllib.request.Request(
+              url,
+              data=json.dumps(body).encode(),
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "feos-repository-factory",
+              },
+          )).read()
+          PY
