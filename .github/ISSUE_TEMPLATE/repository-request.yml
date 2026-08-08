@@ -1,0 +1,70 @@
+name: FEOS repository request
+description: Request a new private repository through the FEOS Repository Factory.
+title: "[FEOS REPO] "
+assignees:
+  - dieck5353-hue
+body:
+  - type: markdown
+    attributes:
+      value: |
+        FEOS creates repositories as private. Public visibility, transfer, archival, and deletion require separate owner approval.
+
+  - type: input
+    id: repository-name
+    attributes:
+      label: Repository name
+      description: Use 1-100 lowercase letters, numbers, dots, underscores, or hyphens.
+      placeholder: new-venture-product
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A concise purpose statement, up to 350 characters.
+      placeholder: What this repository will contain and why it exists.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gitignore
+    attributes:
+      label: Gitignore template
+      options:
+        - None
+        - Node
+        - Python
+        - VisualStudio
+        - Terraform
+        - Go
+        - Rust
+        - Java
+        - macOS
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: license
+    attributes:
+      label: License
+      options:
+        - None
+        - MIT
+        - Apache-2.0
+        - GPL-3.0
+        - BSD-3-Clause
+        - MPL-2.0
+        - Unlicense
+      default: 0
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: private-confirmation
+    attributes:
+      label: Private-only confirmation
+      options:
+        - label: Create this repository under `dieck5353-hue` as private.
+          required: true
